@@ -1,0 +1,11 @@
+#cloud-config
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINJgP4X/ooKWinaUzdCvlncbeV9FoUkb6k+tEqUqwiv5 andrew@vm
+
+package_update: true
+packages:
+  - qemu-guest-agent

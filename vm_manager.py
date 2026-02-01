@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 import urllib.request
@@ -22,27 +23,51 @@ class VmConfig:
 
 class VmManager:
     """
-    Управляет VM через libvirt: download cloud image -> overlay disk -> cloud-init seed -> create/start -> wait IP.
+    Libvirt VM manager with Ubuntu cloud-image + cloud-init (NoCloud).
+
+    Docker note:
+      - This process may run inside a container.
+      - Libvirt/QEMU runs on the HOST.
+      - Therefore, domain XML must reference HOST filesystem paths.
+
+    Paths:
+      - work_dir: where THIS process writes files (container path when in Docker)
+      - host_dir: same directory as seen on HOST (set via env VMS_HOST_DIR)
     """
 
     def __init__(
         self,
         conn_uri: str = "qemu:///system",
-        work_dir: Path | str = "vms",
+        work_dir: str | Path = "vms",
         ubuntu_image_url: str = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
         base_image_name: str = "ubuntu.qcow2",
+        host_dir_env: str = "VMS_HOST_DIR",
     ):
         self.conn_uri = conn_uri
-        self.work_dir = Path(work_dir).resolve()
+
+        # Always absolute; prevents weird relative path behavior
+        self.work_dir = Path(work_dir).expanduser().resolve()
+
+        # Host-visible path to the same directory. Required when running inside Docker.
+        host_dir_value = os.environ.get(host_dir_env)
+        self.host_dir = (
+            Path(host_dir_value).expanduser().resolve()
+            if host_dir_value
+            else self.work_dir
+        )
+
         self.ubuntu_image_url = ubuntu_image_url
 
+        # Container-view directories (where files are created)
         self.images_dir = self.work_dir / "images"
         self.configs_dir = self.work_dir / "configs"
+        self.instances_dir = self.work_dir / "instances"
+
         self.base_image_path = self.images_dir / base_image_name
 
         self._conn: libvirt.virConnect | None = None
 
-    # ---------- Connection lifecycle ----------
+    # ---------- connection ----------
 
     def connect(self) -> libvirt.virConnect:
         conn = libvirt.open(self.conn_uri)
@@ -57,95 +82,119 @@ class VmManager:
             raise RuntimeError("Not connected. Call connect() first.")
         return self._conn
 
-    # ---------- Paths per VM ----------
+    # ---------- directories ----------
 
-    def vm_dir(self, cfg: VmConfig) -> Path:
-        # Удобно хранить диски/seed по папкам VM
-        return (self.work_dir / "instances" / cfg.name).resolve()
-
-    def overlay_disk_path(self, cfg: VmConfig) -> Path:
-        return self.vm_dir(cfg) / "disk.qcow2"
-
-    def seed_iso_path(self, cfg: VmConfig) -> Path:
-        return self.vm_dir(cfg) / "seed.iso"
-
-    # ---------- Provision steps ----------
-
-    def ensure_directories(self, cfg: VmConfig) -> None:
+    def ensure_directories(self) -> None:
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.configs_dir.mkdir(parents=True, exist_ok=True)
-        self.vm_dir(cfg).mkdir(parents=True, exist_ok=True)
+        self.instances_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- VM instance paths (container view) ----------
+
+    def container_vm_dir(self, cfg: VmConfig) -> Path:
+        return self.instances_dir / cfg.name
+
+    def container_overlay_path(self, cfg: VmConfig) -> Path:
+        return self.container_vm_dir(cfg) / "disk.qcow2"
+
+    def container_seed_path(self, cfg: VmConfig) -> Path:
+        return self.container_vm_dir(cfg) / "seed.iso"
+
+    # ---------- VM instance paths (host view) used in XML ----------
+
+    def host_vm_dir(self, cfg: VmConfig) -> Path:
+        return self.host_dir / "instances" / cfg.name
+
+    def host_overlay_path(self, cfg: VmConfig) -> Path:
+        return self.host_vm_dir(cfg) / "disk.qcow2"
+
+    def host_seed_path(self, cfg: VmConfig) -> Path:
+        return self.host_vm_dir(cfg) / "seed.iso"
+
+    # ---------- base image ----------
 
     def download_base_image(self) -> Path:
-        """
-        Скачивает Ubuntu cloud image (qcow2/img) один раз.
-        """
-        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_directories()
         if not self.base_image_path.exists():
             print(f"*** Downloading base image -> {self.base_image_path}")
             urllib.request.urlretrieve(self.ubuntu_image_url, self.base_image_path)
         return self.base_image_path
 
+    # ---------- overlay disk ----------
+
     def create_overlay_disk(self, cfg: VmConfig) -> Path:
         """
-        Создаёт overlay qcow2 на основе base image.
+        Creates overlay qcow2 disk for the VM.
+
+        CRITICAL: backing file path MUST be absolute, otherwise qemu-img treats it relative
+        to the overlay location and you get:
+          vms/instances/<vm>/vms/images/ubuntu.qcow2
         """
-        self.ensure_directories(cfg)
-        base = self.base_image_path.resolve()
-        overlay = self.overlay_disk_path(cfg)
+        self.ensure_directories()
+        vm_dir = self.container_vm_dir(cfg)
+        vm_dir.mkdir(parents=True, exist_ok=True)
+
+        base = self.base_image_path.resolve()  # ABSOLUTE PATH
+        overlay = self.container_overlay_path(cfg)
 
         if overlay.exists():
             return overlay
+
+        if not base.exists():
+            raise FileNotFoundError(f"Base image not found: {base}")
 
         size = f"{cfg.disk_size_gb}G"
         print(f"*** Creating overlay disk -> {overlay} (size {size})")
 
         subprocess.run(
             [
-                "qemu-img",
-                "create",
-                "-f",
-                "qcow2",
-                "-F",
-                "qcow2",
-                "-b",
-                str(base),
+                "qemu-img", "create",
+                "-f", "qcow2",
+                "-F", "qcow2",
+                "-b", str(base),          # ABSOLUTE backing file
                 str(overlay),
                 size,
             ],
             check=True,
         )
+
+        if not overlay.exists():
+            raise RuntimeError(f"Overlay disk was not created: {overlay}")
+
         return overlay
+
+    # ---------- cloud-init seed ----------
 
     def build_cloud_init_seed(self, cfg: VmConfig) -> Path:
         """
-        Собирает seed.iso из user-data/meta-data (NoCloud) через cloud-localds.
-        Требует установленный cloud-localds (cloud-image-utils).
+        Builds seed.iso from configs/user-data and configs/meta-data using cloud-localds.
         """
-        self.ensure_directories(cfg)
+        self.ensure_directories()
+        vm_dir = self.container_vm_dir(cfg)
+        vm_dir.mkdir(parents=True, exist_ok=True)
+
         user_data = self.configs_dir / "user-data"
         meta_data = self.configs_dir / "meta-data"
 
         if not user_data.exists():
-            raise FileNotFoundError(f"Missing {user_data}. Create it first.")
+            raise FileNotFoundError(f"Missing {user_data}")
         if not meta_data.exists():
-            raise FileNotFoundError(f"Missing {meta_data}. Create it first.")
+            raise FileNotFoundError(f"Missing {meta_data}")
 
-        seed = self.seed_iso_path(cfg)
+        seed = self.container_seed_path(cfg)
         print(f"*** Building cloud-init seed -> {seed}")
 
         subprocess.run(
-            [
-                "cloud-localds",
-                str(seed),
-                str(user_data),
-                str(meta_data),
-            ],
+            ["cloud-localds", str(seed), str(user_data), str(meta_data)],
             check=True,
         )
+
+        if not seed.exists():
+            raise RuntimeError(f"seed.iso was not created: {seed}")
+
         return seed
 
-    # ---------- Libvirt helpers ----------
+    # ---------- libvirt network ----------
 
     def ensure_network_active(self, network_name: str) -> None:
         net = self.conn.networkLookupByName(network_name)
@@ -159,6 +208,8 @@ class VmManager:
         if net.autostart() == 0:
             net.setAutostart(1)
 
+    # ---------- domain lifecycle ----------
+
     def domain_exists(self, name: str) -> bool:
         try:
             self.conn.lookupByName(name)
@@ -168,12 +219,12 @@ class VmManager:
 
     def destroy_domain(self, name: str) -> None:
         """
-        Останавливает и удаляет домен (define) если существует.
+        Stop and undefine domain if present.
         """
         try:
             dom = self.conn.lookupByName(name)
         except libvirt.libvirtError:
-            print(f"*** Domain '{name}' not found, nothing to delete")
+            # silent - normal when domain does not exist
             return
 
         if dom.isActive():
@@ -183,12 +234,15 @@ class VmManager:
         print(f"*** Undefining domain '{name}'")
         dom.undefine()
 
-    # ---------- VM create/start ----------
+    # ---------- domain XML ----------
 
-    def render_domain_xml(self, cfg: VmConfig, overlay: Path, seed_iso: Path) -> str:
+    def render_domain_xml(self, cfg: VmConfig) -> str:
         """
-        Рендерит XML домена. (минимально необходимое)
+        Domain XML MUST reference host paths (host_dir) because qemu runs on host.
         """
+        host_overlay = self.host_overlay_path(cfg)
+        host_seed = self.host_seed_path(cfg)
+
         return f"""
 <domain type='kvm'>
   <name>{cfg.name}</name>
@@ -202,12 +256,12 @@ class VmManager:
   <devices>
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2'/>
-      <source file='{overlay}'/>
+      <source file='{host_overlay}'/>
       <target dev='vda' bus='virtio'/>
     </disk>
 
     <disk type='file' device='cdrom'>
-      <source file='{seed_iso}'/>
+      <source file='{host_seed}'/>
       <target dev='sda' bus='sata'/>
       <readonly/>
     </disk>
@@ -222,26 +276,30 @@ class VmManager:
 </domain>
 """.strip()
 
+    # ---------- create & start ----------
+
     def create_and_start(self, cfg: VmConfig, recreate: bool = False) -> libvirt.virDomain:
         """
-        Полный пайплайн:
-        - download base image (если нет)
-        - ensure network active
-        - create overlay (если нет)
-        - build seed.iso
-        - define+start domain
+        Full pipeline:
+          - download base image
+          - ensure network active
+          - optional recreate (destroy existing)
+          - create overlay disk
+          - build seed.iso
+          - define + start domain
         """
-        self.ensure_directories(cfg)
+        self.ensure_directories()
         self.download_base_image()
         self.ensure_network_active(cfg.network_name)
 
-        if recreate and self.domain_exists(cfg.name):
+        if recreate:
             self.destroy_domain(cfg.name)
 
-        overlay = self.create_overlay_disk(cfg)
-        seed = self.build_cloud_init_seed(cfg)
+        # Create files in work_dir (container view)
+        self.create_overlay_disk(cfg)
+        self.build_cloud_init_seed(cfg)
 
-        xml = self.render_domain_xml(cfg, overlay, seed)
+        xml = self.render_domain_xml(cfg)
 
         print(f"*** Defining domain '{cfg.name}'")
         dom = self.conn.defineXML(xml)
@@ -251,12 +309,9 @@ class VmManager:
 
         return dom
 
-    # ---------- Wait for IP (default network) ----------
+    # ---------- wait for IP ----------
 
     def wait_for_ip(self, cfg: VmConfig, timeout_s: int = 120) -> str:
-        """
-        Получает IP через DHCP leases в libvirt network (подходит для 'default' NAT).
-        """
         dom = self.conn.lookupByName(cfg.name)
         mac = self._get_domain_mac(dom)
         if not mac:
