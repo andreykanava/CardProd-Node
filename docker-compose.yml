@@ -2,12 +2,16 @@ services:
   node:
     build: .
     container_name: wg-node
+    restart: unless-stopped
+
+    network_mode: host
+
     environment:
       - DATA_DIR=/data
       - WG_IFACE=wg0
-      - CONTROLLER_URL=${CONTROLLER_URL}   # http://PUBLIC_IP_OF_CONTROLLER:9000
+      - CONTROLLER_URL=${CONTROLLER_URL}
       - JOIN_TOKEN=${JOIN_TOKEN}
-      - NODE_ID=${NODE_ID}                 # уникально: node-1 / ams-01 / etc
+      - NODE_ID=${NODE_ID}
       - NODE_API_PORT=8000
 
       # VM stuff
@@ -16,16 +20,19 @@ services:
       - VMS_NETWORK=default
       - VMS_ARCH=x86_64
       - VMS_HOST_DIR=${VMS_HOST_DIR}
-      - VMS_WORK_DIR=/srv/vms
+
+      # NEW: protect /ports
+      - PORTMAP_TOKEN=${PORTMAP_TOKEN}
+
     volumes:
       - wg_node_data:/data
       - /lib/modules:/lib/modules:ro
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
       - ./srv/vms:/srv/vms
+
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-    restart: unless-stopped
 
 volumes:
   wg_node_data:

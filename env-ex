@@ -1,0 +1,7 @@
+CONTROLLER_URL=http://PUBLIC_IP_OF_CONTROLLER:9000
+JOIN_TOKEN=supersecret
+NODE_ID=node-1
+VMS_HOST_DIR=/absolute/path/to/your/srv/vms
+
+# generate: openssl rand -hex 32
+PORTMAP_TOKEN=PUT_RANDOM_SECRET_HERE

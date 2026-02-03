@@ -25,7 +25,7 @@ RUN python3 -m venv --system-site-packages /opt/venv \
 ENV PATH="/opt/venv/bin:$PATH"
 
 # App files
-COPY app.py vm_manager.py ./
+COPY app.py vm_manager.py portmap.py ./
 COPY entrypoint.sh ./
 RUN chmod +x /app/entrypoint.sh
 

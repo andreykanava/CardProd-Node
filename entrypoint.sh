@@ -93,6 +93,19 @@ wg-quick up "${WG_IFACE}"
 echo "[*] wg show:"
 wg show "${WG_IFACE}" || true
 
+# после wg show ...
+echo "[*] Restoring portmap rules (best-effort)..."
+python3 - <<'PY' || true
+import os
+try:
+    from portmap import restore_all
+    n = restore_all()
+    print(f"[*] Portmap restored: {n}")
+except Exception as e:
+    print(f"[!] Portmap restore failed (ignored): {e}")
+PY
+
+
 # ----- start API -----
 echo "[*] Starting node VM API on ${NODE_IP}:${NODE_API_PORT}"
 
