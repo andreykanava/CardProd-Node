@@ -1,2 +1,4 @@
 /__pycache__
+/srv/vms/images
+/srv/vmsinstances
 .env

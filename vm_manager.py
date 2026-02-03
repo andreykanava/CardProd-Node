@@ -37,9 +37,11 @@ class VmManager:
         ubuntu_image_url: str = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
         base_image_name: str = "ubuntu.qcow2",
         host_dir_env: str = "VMS_HOST_DIR",
+        base_dir: Path | None = None
     ):
         self.conn_uri = conn_uri
-        self.work_dir = Path(work_dir).expanduser().resolve()
+        base_dir = base_dir or Path(__file__).resolve().parent  # папка файла, не cwd
+        self.work_dir = (base_dir / work_dir).resolve()
 
         host_dir_value = os.environ.get(host_dir_env)
         self.host_dir = (

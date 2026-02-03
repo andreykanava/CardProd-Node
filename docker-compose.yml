@@ -15,12 +15,13 @@ services:
       - LIBVIRT_URI=qemu:///system
       - VMS_NETWORK=default
       - VMS_ARCH=x86_64
-      - VMS_HOST_DIR=/srv/vms
+      - VMS_HOST_DIR=${VMS_HOST_DIR}
+      - VMS_WORK_DIR=/srv/vms
     volumes:
       - wg_node_data:/data
       - /lib/modules:/lib/modules:ro
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
-      - /srv/vms:/srv/vms
+      - ./srv/vms:/srv/vms
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
