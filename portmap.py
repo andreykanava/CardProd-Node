@@ -14,6 +14,10 @@ PORTMAP_FILE = DATA_DIR / "portmap.json"
 VM_BRIDGE = os.environ.get("VMS_BRIDGE", "virbr0")
 WG_IFACE = os.environ.get("WG_IFACE", "wg0")
 
+# NAT for VM internet access
+VM_SUBNET = os.environ.get("VM_SUBNET", "192.168.122.0/24")
+EXTERNAL_IFACE = os.environ.get("EXTERNAL_IFACE", None)  # None = auto detect
+
 Proto = Literal["tcp"]
 
 
@@ -67,6 +71,19 @@ def save_state(state: dict) -> None:
     PORTMAP_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
+def _get_default_iface() -> str:
+    """Return the interface used for the default route."""
+    try:
+        out = subprocess.check_output(["ip", "route", "show", "default"], text=True)
+        parts = out.split()
+        if "dev" in parts:
+            idx = parts.index("dev")
+            return parts[idx + 1]
+    except Exception:
+        pass
+    return "eth0"  # fallback
+
+
 def _ensure_wg_masquerade(wg_iface: str) -> None:
     """
     IMPORTANT for multi-hop:
@@ -85,6 +102,37 @@ def _maybe_cleanup_wg_masquerade(wg_iface: str) -> None:
     if st.get("rules"):
         return
     _iptables_del_if_exists("nat", "POSTROUTING", ["-o", wg_iface, "-j", "MASQUERADE"])
+
+
+def _ensure_vm_nat(bridge: str) -> None:
+    """
+    Ensure that traffic from the VM subnet can reach the internet.
+    Adds MASQUERADE on the external interface for the whole VM subnet.
+    """
+    subnet = VM_SUBNET
+    iface = EXTERNAL_IFACE or _get_default_iface()
+    if not iface:
+        # Cannot determine external interface – skip
+        return
+
+    rule = ["-s", subnet, "-o", iface, "-j", "MASQUERADE"]
+    if not _iptables_rule_exists("nat", "POSTROUTING", rule):
+        _sh_ok("iptables", "-t", "nat", "-I", "POSTROUTING", *rule)
+
+
+def _maybe_cleanup_vm_nat(bridge: str) -> None:
+    """
+    Remove the global VM MASQUERADE rule when no port‑forwarding rules remain.
+    """
+    st = load_state()
+    if st.get("rules"):
+        return
+    subnet = VM_SUBNET
+    iface = EXTERNAL_IFACE or _get_default_iface()
+    if not iface:
+        return
+    rule = ["-s", subnet, "-o", iface, "-j", "MASQUERADE"]
+    _iptables_del_if_exists("nat", "POSTROUTING", rule)
 
 
 def apply_rule(
@@ -108,6 +156,9 @@ def apply_rule(
 
     # 0) make sure WG SNAT exists (critical for your proxy chain)
     _ensure_wg_masquerade(wg)
+
+    # 0a) ensure VM subnet can reach internet
+    _ensure_vm_nat(br)
 
     # 1) DNAT incoming packets to the VM
     preroute = [
@@ -181,8 +232,9 @@ def delete_rule(
     ]
     _iptables_del_if_exists("nat", "POSTROUTING", postroute_vm)
 
-    # Optional: remove wg masquerade when nothing left
+    # Remove global helpers if no rules left
     _maybe_cleanup_wg_masquerade(wg)
+    _maybe_cleanup_vm_nat(br)
 
 
 def restore_all() -> int:
