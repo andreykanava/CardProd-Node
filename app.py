@@ -197,3 +197,13 @@ def restore_ports():
         return jsonify({"ok": True, "restored": n})
     except Exception as e:
         return err(str(e), 500)
+
+@app.get("/stats")
+def stats():
+    try:
+        mgr = get_mgr()
+        st = mgr.host_stats()
+        return jsonify({"ok": True, **st})
+    except Exception as e:
+        return err(str(e), 500)
+    

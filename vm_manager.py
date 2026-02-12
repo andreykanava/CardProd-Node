@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import libvirt
+import shutil
 
 
 @dataclass(frozen=True)
@@ -365,3 +366,82 @@ class VmManager:
                     vm_dir.rmdir()
                 except OSError:
                     pass
+
+
+
+    def list_domains(self) -> list[dict]:
+        """
+        Return basic info about all domains on this libvirt host.
+        """
+        domains = []
+        for dom in self.conn.listAllDomains(0):
+            try:
+                state, _ = dom.state()
+                active = dom.isActive() == 1
+                domains.append({
+                    "name": dom.name(),
+                    "uuid": dom.UUIDString(),
+                    "active": active,
+                    "state_code": int(state),
+                })
+            except Exception:
+                # don't let one broken VM kill the whole list
+                continue
+        return domains
+
+    def host_stats(self) -> dict:
+        """
+        Minimal host stats for scheduling.
+        """
+        # CPU cores (logical)
+        try:
+            cores = os.cpu_count() or 0
+        except Exception:
+            cores = 0
+
+        # Loadavg
+        try:
+            load1, load5, load15 = os.getloadavg()
+        except Exception:
+            load1, load5, load15 = (0.0, 0.0, 0.0)
+
+        # RAM (from /proc/meminfo)
+        mem_total_kb = 0
+        mem_avail_kb = 0
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        mem_total_kb = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        mem_avail_kb = int(line.split()[1])
+        except Exception:
+            pass
+
+        total_mb = mem_total_kb // 1024
+        free_mb = mem_avail_kb // 1024
+
+        # Disk free for WORK_DIR partition
+        try:
+            usage = shutil.disk_usage(self.work_dir)
+            disk_total_gb = int(usage.total // (1024**3))
+            disk_free_gb = int(usage.free // (1024**3))
+        except Exception:
+            disk_total_gb = 0
+            disk_free_gb = 0
+
+        # VM counts
+        try:
+            vms = self.list_domains()
+            running = sum(1 for d in vms if d.get("active"))
+            total = len(vms)
+        except Exception:
+            running = 0
+            total = 0
+
+        return {
+            "cpu": {"cores": int(cores), "load1": float(load1), "load5": float(load5), "load15": float(load15)},
+            "ram": {"total_mb": int(total_mb), "free_mb": int(free_mb)},
+            "disk": {"total_gb": int(disk_total_gb), "free_gb": int(disk_free_gb)},
+            "vms": {"total": int(total), "running": int(running)},
+        }
